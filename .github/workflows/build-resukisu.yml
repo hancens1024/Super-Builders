@@ -87,6 +87,11 @@ jobs:
         name: anykernel3
         path: AnyKernel3
 
+    - name: Patch AnyKernel3 For init_boot Devices
+      run: |
+        python3 "$GITHUB_WORKSPACE/.github/scripts/patch-anykernel3-init-boot-compat.py" \
+          "$GITHUB_WORKSPACE/AnyKernel3/anykernel.sh"
+
     - name: Download Git Repo Tool Artifact
       uses: actions/download-artifact@v8
       with:
