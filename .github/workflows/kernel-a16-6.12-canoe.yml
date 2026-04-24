@@ -1,0 +1,222 @@
+name: "Android 16 - Kernel 6.12 (Canoe Source)"
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: "Source branch"
+        type: choice
+        options:
+          - android16-6.12-2025-06
+        default: android16-6.12-2025-06
+      sukisu_branch:
+        description: "SukiSU branch"
+        type: choice
+        options:
+          - susfs-stable
+          - susfs-dev
+        default: susfs-stable
+      add_susfs:
+        description: "Add SUSFS"
+        type: boolean
+        default: true
+      add_vfs:
+        description: "Add VFS / manual hooks"
+        type: boolean
+        default: true
+      add_kpm:
+        description: "Patch Image with patch_linux"
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    name: "Canoe ${{ inputs.source_branch }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v6
+
+    - name: Free Disk Space
+      uses: endersonmenezes/free-disk-space@v3
+      with:
+        remove_android: true
+        remove_dotnet: true
+        remove_haskell: true
+        remove_tool_cache: true
+        remove_swap: true
+        remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+        remove_packages_one_command: true
+        remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+        rm_cmd: "rmz"
+        rmz_version: "3.1.1"
+        testing: false
+
+    - name: Install Build Dependencies
+      run: |
+        sudo apt-get update -y -qq
+        sudo apt-get install -y -qq lld binutils
+
+    - name: Prepare Workspace
+      run: |
+        echo "WORKDIR=$GITHUB_WORKSPACE/canoe-work" >> "$GITHUB_ENV"
+        echo "KERNEL_ROOT=$GITHUB_WORKSPACE/canoe-work/kernel" >> "$GITHUB_ENV"
+        echo "ANYKERNEL3=$GITHUB_WORKSPACE/canoe-work/AnyKernel3-KernelSU-Next" >> "$GITHUB_ENV"
+        echo "FRAGMENT=$GITHUB_WORKSPACE/canoe-work/kernel/canoe_gki.fragment" >> "$GITHUB_ENV"
+        mkdir -p "$GITHUB_WORKSPACE/canoe-work"
+
+    - name: Clone Kernel Source
+      run: |
+        git clone --depth=1 -b "${{ inputs.source_branch }}" \
+          https://github.com/schqiushui/android_kernel_common_android16-6.12.git \
+          "$KERNEL_ROOT"
+
+    - name: Setup SukiSU
+      env:
+        SUKISU_BRANCH: ${{ inputs.sukisu_branch }}
+      run: |
+        cd "$KERNEL_ROOT"
+        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "$SUKISU_BRANCH"
+
+        cd "$KERNEL_ROOT/KernelSU"
+        KSU_VERSION=$(expr "$(/usr/bin/git rev-list --count main)" + 10606)
+        echo "KSUVER=$KSU_VERSION" >> "$GITHUB_ENV"
+        export KSU_VERSION="$KSU_VERSION"
+        sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+
+    - name: Apply SUSFS Patch
+      if: inputs.add_susfs
+      run: |
+        cd "$WORKDIR"
+        git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU_patch.git
+        git clone --depth=1 -b gki-android16-6.12 https://gitlab.com/simonpunk/susfs4ksu.git
+
+        cp "./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android16-6.12.patch" "$KERNEL_ROOT/"
+        cp ./susfs4ksu/kernel_patches/fs/* "$KERNEL_ROOT/fs/"
+        cp ./susfs4ksu/kernel_patches/include/linux/* "$KERNEL_ROOT/include/linux/"
+
+        cd "$KERNEL_ROOT"
+        patch -p1 -F3 --no-backup-if-mismatch < "50_add_susfs_in_gki-android16-6.12.patch"
+
+    - name: Apply VFS Hook Patch
+      if: inputs.add_vfs
+      run: |
+        if [ ! -d "$WORKDIR/SukiSU_patch" ]; then
+          git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU_patch.git "$WORKDIR/SukiSU_patch"
+        fi
+        cp "$WORKDIR/SukiSU_patch/hooks/syscall_hooks.patch" "$KERNEL_ROOT/"
+        cd "$KERNEL_ROOT"
+        patch -p1 -F3 --no-backup-if-mismatch < syscall_hooks.patch
+
+    - name: Build Defconfig Fragment
+      env:
+        ADD_VFS: ${{ inputs.add_vfs }}
+      run: |
+        cat > "$FRAGMENT" <<'EOF'
+CONFIG_KSU=y
+CONFIG_KPM=y
+CONFIG_KSU_SUSFS=y
+CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_PATH=y
+CONFIG_KSU_SUSFS_SUS_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_KSTAT=y
+CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n
+CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+CONFIG_KSU_SUSFS_ENABLE_LOG=y
+CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+EOF
+
+        if [ "$ADD_VFS" = "true" ]; then
+          cat >> "$FRAGMENT" <<'EOF'
+CONFIG_KSU_SUSFS_SUS_SU=n
+CONFIG_KSU_MANUAL_HOOK=y
+EOF
+        else
+          cat >> "$FRAGMENT" <<'EOF'
+CONFIG_KSU_SUSFS_SUS_SU=y
+CONFIG_KSU_MANUAL_HOOK=n
+EOF
+        fi
+
+    - name: Build Kernel
+      run: |
+        cd "$KERNEL_ROOT"
+        if [ -f common/tools/bpf/resolve_btfids/Makefile ]; then
+          echo 'override KBUILD_HOSTLDFLAGS += --sysroot=/' >> common/tools/bpf/resolve_btfids/Makefile
+          echo 'override LDFLAGS += --sysroot=/' >> common/tools/bpf/resolve_btfids/Makefile
+        fi
+        tools/bazel build --config=fast --lto=none \
+          --defconfig_fragment=//:$(basename "$FRAGMENT") \
+          //common:kernel_aarch64_dist
+
+    - name: Clone AnyKernel3
+      run: |
+        git clone --depth=1 -b gki-2.0 \
+          https://github.com/schqiushui/AnyKernel3-KernelSU-Next.git \
+          "$ANYKERNEL3"
+        rm -rf "$ANYKERNEL3/.git"
+
+    - name: Copy Image Into AnyKernel3
+      run: |
+        IMAGE_PATH="$KERNEL_ROOT/bazel-bin/common/kernel_aarch64/Image"
+        test -f "$IMAGE_PATH"
+        cp "$IMAGE_PATH" "$ANYKERNEL3/Image"
+        mkdir -p "$WORKDIR/image_output"
+        cp "$IMAGE_PATH" "$WORKDIR/image_output/Image"
+
+    - name: Apply patch_linux
+      if: inputs.add_kpm
+      run: |
+        cd "$WORKDIR/image_output"
+        curl -LO https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.11-beta/patch_linux
+        chmod +x patch_linux
+        ./patch_linux
+        cp oImage "$ANYKERNEL3/Image"
+
+    - name: Format Artifact Names
+      run: |
+        DATE="$(date +'%Y%m%d-%H%M')"
+        echo "DATE=$DATE" >> "$GITHUB_ENV"
+        echo "ARTIFACT_BASE=AK3-${{ inputs.source_branch }}-canoe-gki-${KSUVER:-unknown}-${DATE}" >> "$GITHUB_ENV"
+
+    - name: Upload AnyKernel3 Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.ARTIFACT_BASE }}
+        path: ${{ env.ANYKERNEL3 }}/*
+
+    - name: Create AnyKernel3 Zip
+      run: |
+        cd "$ANYKERNEL3"
+        zip -r "$WORKDIR/${ARTIFACT_BASE}.zip" *
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        name: "Canoe Kernel Release ${{ env.DATE }}"
+        tag_name: ${{ env.DATE }}
+        body: |
+          - Source: `schqiushui/android_kernel_common_android16-6.12`
+          - Branch: `${{ inputs.source_branch }}`
+          - SukiSU branch: `${{ inputs.sukisu_branch }}`
+          - SUSFS: `${{ inputs.add_susfs }}`
+          - VFS hooks: `${{ inputs.add_vfs }}`
+          - KPM patch_linux: `${{ inputs.add_kpm }}`
+          - KSU version: `${{ env.KSUVER }}`
+        files: |
+          ${{ env.WORKDIR }}/${{ env.ARTIFACT_BASE }}.zip
+          ${{ env.WORKDIR }}/image_output/Image
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
