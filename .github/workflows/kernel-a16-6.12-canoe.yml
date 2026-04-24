@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       source_branch:
-        description: "Source branch"
+        description: "Canoe common branch"
         type: choice
         options:
           - android16-6.12-2025-06
@@ -37,7 +37,7 @@ jobs:
   build:
     name: "Canoe ${{ inputs.source_branch }}"
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
     - name: Checkout Repository
@@ -61,21 +61,34 @@ jobs:
     - name: Install Build Dependencies
       run: |
         sudo apt-get update -y -qq
-        sudo apt-get install -y -qq lld binutils
+        sudo apt-get install -y -qq lld binutils git curl python3
+        curl -sSL https://storage.googleapis.com/git-repo-downloads/repo -o /tmp/repo
+        chmod +x /tmp/repo
+        sudo mv /tmp/repo /usr/local/bin/repo
 
     - name: Prepare Workspace
       run: |
         echo "WORKDIR=$GITHUB_WORKSPACE/canoe-work" >> "$GITHUB_ENV"
         echo "KERNEL_ROOT=$GITHUB_WORKSPACE/canoe-work/kernel" >> "$GITHUB_ENV"
         echo "ANYKERNEL3=$GITHUB_WORKSPACE/canoe-work/AnyKernel3-KernelSU-Next" >> "$GITHUB_ENV"
-        echo "FRAGMENT=$GITHUB_WORKSPACE/canoe-work/kernel/canoe_gki.fragment" >> "$GITHUB_ENV"
+        echo "FRAGMENT=$GITHUB_WORKSPACE/canoe-work/kernel/common/canoe_gki.fragment" >> "$GITHUB_ENV"
         mkdir -p "$GITHUB_WORKSPACE/canoe-work"
 
-    - name: Clone Kernel Source
+    - name: Sync Android Kernel Workspace
       run: |
-        git clone --depth=1 -b "${{ inputs.source_branch }}" \
-          https://github.com/schqiushui/android_kernel_common_android16-6.12.git \
-          "$KERNEL_ROOT"
+        cd "$WORKDIR"
+        mkdir -p kernel
+        cd kernel
+        repo init -u https://android.googlesource.com/kernel/manifest \
+          -b common-android16-6.12-2025-06 --depth=1
+        repo sync -c -j"$(nproc --all)" --fail-fast --no-tags --force-sync --no-clone-bundle
+
+    - name: Replace common With Canoe Source
+      run: |
+        cd "$KERNEL_ROOT/common"
+        git remote add canoe https://github.com/schqiushui/android_kernel_common_android16-6.12.git
+        git fetch --depth=1 canoe "${{ inputs.source_branch }}"
+        git checkout -B "${{ inputs.source_branch }}" FETCH_HEAD
 
     - name: Setup SukiSU
       env:
@@ -97,11 +110,11 @@ jobs:
         git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU_patch.git
         git clone --depth=1 -b gki-android16-6.12 https://gitlab.com/simonpunk/susfs4ksu.git
 
-        cp "./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android16-6.12.patch" "$KERNEL_ROOT/"
-        cp ./susfs4ksu/kernel_patches/fs/* "$KERNEL_ROOT/fs/"
-        cp ./susfs4ksu/kernel_patches/include/linux/* "$KERNEL_ROOT/include/linux/"
+        cp "./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android16-6.12.patch" "$KERNEL_ROOT/common/"
+        cp ./susfs4ksu/kernel_patches/fs/* "$KERNEL_ROOT/common/fs/"
+        cp ./susfs4ksu/kernel_patches/include/linux/* "$KERNEL_ROOT/common/include/linux/"
 
-        cd "$KERNEL_ROOT"
+        cd "$KERNEL_ROOT/common"
         patch -p1 -F3 --no-backup-if-mismatch < "50_add_susfs_in_gki-android16-6.12.patch"
 
     - name: Apply VFS Hook Patch
@@ -110,8 +123,8 @@ jobs:
         if [ ! -d "$WORKDIR/SukiSU_patch" ]; then
           git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU_patch.git "$WORKDIR/SukiSU_patch"
         fi
-        cp "$WORKDIR/SukiSU_patch/hooks/syscall_hooks.patch" "$KERNEL_ROOT/"
-        cd "$KERNEL_ROOT"
+        cp "$WORKDIR/SukiSU_patch/hooks/syscall_hooks.patch" "$KERNEL_ROOT/common/"
+        cd "$KERNEL_ROOT/common"
         patch -p1 -F3 --no-backup-if-mismatch < syscall_hooks.patch
 
     - name: Build Defconfig Fragment
@@ -150,6 +163,12 @@ jobs:
             >> "$FRAGMENT"
         fi
 
+    - name: Install Bazelisk
+      run: |
+        curl -L -o /tmp/bazelisk https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64
+        chmod +x /tmp/bazelisk
+        sudo mv /tmp/bazelisk /usr/local/bin/bazel
+
     - name: Build Kernel
       run: |
         cd "$KERNEL_ROOT"
@@ -157,8 +176,8 @@ jobs:
           echo 'override KBUILD_HOSTLDFLAGS += --sysroot=/' >> common/tools/bpf/resolve_btfids/Makefile
           echo 'override LDFLAGS += --sysroot=/' >> common/tools/bpf/resolve_btfids/Makefile
         fi
-        tools/bazel build --config=fast --lto=none \
-          --defconfig_fragment=//:$(basename "$FRAGMENT") \
+        bazel build --config=fast --lto=none \
+          --defconfig_fragment=//common:$(basename "$FRAGMENT") \
           //common:kernel_aarch64_dist
 
     - name: Clone AnyKernel3
@@ -208,8 +227,8 @@ jobs:
         name: "Canoe Kernel Release ${{ env.DATE }}"
         tag_name: ${{ env.DATE }}
         body: |
-          - Source: `schqiushui/android_kernel_common_android16-6.12`
-          - Branch: `${{ inputs.source_branch }}`
+          - Source branch: `${{ inputs.source_branch }}`
+          - Workspace base: `common-android16-6.12-2025-06`
           - SukiSU branch: `${{ inputs.sukisu_branch }}`
           - SUSFS: `${{ inputs.add_susfs }}`
           - VFS hooks: `${{ inputs.add_vfs }}`
