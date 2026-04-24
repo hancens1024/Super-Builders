@@ -175,6 +175,15 @@ jobs:
             >> "$FRAGMENT"
         fi
 
+    - name: Sanitize Defconfig Fragment
+      run: |
+        while IFS='=' read -r cfg _; do
+          symbol="${cfg#CONFIG_}"
+          grep -Rqx "config ${symbol}" "$KERNEL_ROOT/common" "$KERNEL_ROOT/KernelSU" \
+            --include='Kconfig*' 2>/dev/null && continue
+          sed -i "/^${cfg}=/d" "$FRAGMENT"
+        done < <(grep '^CONFIG_KSU_' "$FRAGMENT" || true)
+
     - name: Install Bazelisk
       run: |
         curl -L -o /tmp/bazelisk https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64
