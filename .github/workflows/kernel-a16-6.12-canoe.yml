@@ -106,26 +106,30 @@ jobs:
     - name: Apply SUSFS Patch
       if: inputs.add_susfs
       run: |
-        cd "$WORKDIR"
-        git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU_patch.git
-        git clone --depth=1 -b gki-android16-6.12 https://gitlab.com/simonpunk/susfs4ksu.git
-
-        cp "./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android16-6.12.patch" "$KERNEL_ROOT/common/"
-        cp ./susfs4ksu/kernel_patches/fs/* "$KERNEL_ROOT/common/fs/"
-        cp ./susfs4ksu/kernel_patches/include/linux/* "$KERNEL_ROOT/common/include/linux/"
-
+        PATCH_DIR="$GITHUB_WORKSPACE/android16-6.12/SukiSU-Ultra/patches"
         cd "$KERNEL_ROOT/common"
-        patch -p1 -F3 --no-backup-if-mismatch < "50_add_susfs_in_gki-android16-6.12.patch"
+        patch -p1 -F3 --no-backup-if-mismatch < "$PATCH_DIR/50_add_susfs_in_gki-android16-6.12.patch"
+        patch -p1 -F3 --no-backup-if-mismatch < "$PATCH_DIR/51_enhanced_susfs-android16-6.12.patch"
+
+    - name: Apply KSU Safety Patch
+      if: inputs.add_susfs
+      run: |
+        PATCH_DIR="$GITHUB_WORKSPACE/android16-6.12/SukiSU-Ultra/patches"
+        cd "$KERNEL_ROOT/KernelSU"
+        patch -p1 --no-backup-if-mismatch < "$PATCH_DIR/70_ksu_safety-sukisu-6.12.patch"
+
+    - name: Fix SUSFS Compatibility
+      if: inputs.add_susfs
+      run: |
+        bash "$GITHUB_WORKSPACE/android16-6.12/build-helpers/fix-susfs-compat.sh" \
+          "$KERNEL_ROOT/common" "23" "android16" "6.12" ""
 
     - name: Apply VFS Hook Patch
       if: inputs.add_vfs
       run: |
-        if [ ! -d "$WORKDIR/SukiSU_patch" ]; then
-          git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU_patch.git "$WORKDIR/SukiSU_patch"
-        fi
-        cp "$WORKDIR/SukiSU_patch/hooks/syscall_hooks.patch" "$KERNEL_ROOT/common/"
+        cp "$GITHUB_WORKSPACE/android16-6.12/SukiSU-Ultra/patches/60_zeromount-android16-6.12.patch" "$KERNEL_ROOT/common/"
         cd "$KERNEL_ROOT/common"
-        patch -p1 -F3 --no-backup-if-mismatch < syscall_hooks.patch
+        patch -p1 -F3 --no-backup-if-mismatch < 60_zeromount-android16-6.12.patch
 
     - name: Build Defconfig Fragment
       env:
